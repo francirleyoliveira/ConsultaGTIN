@@ -1,0 +1,23 @@
+# Bibliotecas necessarias para a Integracao Winthor x Sefaz (CCG)
+
+# Para comunicacao com o banco de dados Oracle 11g
+oracledb
+
+# Para comunicacao web com a Sefaz usando certificado digital .pfx
+requests-pkcs12
+
+# Para leitura das variaveis de seguranca no arquivo .env
+python-dotenv
+
+# Para criacao e manipulacao de tabelas e arquivos Excel
+pandas
+openpyxl
+
+# Para interface desktop
+customtkinter
+
+# Para modulo B (scraping do Portal Conformidade)
+selenium
+
+# Para modulo C (cliente SOAP/WSDL)
+zeep
