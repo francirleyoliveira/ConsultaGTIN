@@ -1,10 +1,13 @@
 def validar_digito_gtin(gtin) -> bool:
     """Valida o digito verificador de um GTIN (8, 12, 13 ou 14 digitos)."""
     try:
-        gtin = str(gtin).strip().zfill(14)
-        if not gtin.isdigit():
+        gtin_limpo = str(gtin).strip()
+        if not gtin_limpo.isdigit():
+            return False
+        if len(gtin_limpo) not in {8, 12, 13, 14}:
             return False
 
+        gtin = gtin_limpo.zfill(14)
         corpo = gtin[:-1]
         digito_informado = int(gtin[-1])
 

@@ -121,6 +121,7 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
                 "ncm_oficial": "22030000",
                 "divergencia_ncm": "OK",
                 "descricao_produto": "Produto Teste",
+                "descricao_erp": "Produto ERP",
                 "cest": "123",
             }
         )
@@ -211,15 +212,15 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
                     "cst": "060",
                     "cclasstrib": "ABC123",
                     "condicao_legal": "Uso geral",
-                    "descricao_dossie": "Dossie teste",
-                    "p_red_ibs": "12.5",
-                    "p_red_cbs": "7.5",
-                    "publicacao": "2026-03-24T00:00:00",
-                    "inicio_vigencia": "2026-04-01T00:00:00",
-                    "anexo": "IV",
-                    "ind_nfe": "S",
+                    "descricao_dossie": "Valor do cenario nao deve prevalecer",
+                    "p_red_ibs": "99.9",
+                    "p_red_cbs": "99.9",
+                    "publicacao": "2099-01-01T00:00:00",
+                    "inicio_vigencia": "2099-01-01T00:00:00",
+                    "anexo": "IGNORAR",
+                    "ind_nfe": "N",
                     "ind_nfce": "N",
-                    "base_legal": "LC 214/25",
+                    "base_legal": "IGNORAR",
                     "fonte": "portal_conformidade_facil",
                 }
             ],
@@ -233,10 +234,17 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
 
         self.assertEqual(1, len(consultas))
         self.assertEqual("7891234567895", consultas[0]["gtin"])
+
+        consultas_filtradas = self.repo.listar_consultas({"cod_winthor": "100"})
+        self.assertEqual(1, len(consultas_filtradas))
+        self.assertEqual("7891234567895", consultas_filtradas[0]["gtin"])
+        self.assertEqual("Produto ERP", consultas[0]["descricao_erp"])
         self.assertEqual(1, len(cenarios))
         self.assertEqual("22030000", cenarios[0]["ncm"])
         self.assertEqual("060", cenarios[0]["cst"])
         self.assertEqual("ABC123", cenarios[0]["cclasstrib"])
+        self.assertNotIn("descricao_erp", cenarios[0])
+        self.assertEqual("Dossie teste", cenarios[0]["descricao_dossie"])
         self.assertEqual("12.5", cenarios[0]["p_red_ibs"])
         self.assertEqual("2026-04-01T00:00:00", cenarios[0]["inicio_vigencia"])
         self.assertEqual("IV", cenarios[0]["anexo"])
@@ -249,9 +257,37 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
         self.assertEqual("ESP2", retorno_anexos[0]["codigo_especificidade"])
         self.assertEqual("Faixa especial", retorno_anexos[0]["descricao_especificidade"])
         self.assertEqual(1, resumo["total"])
+        self.assertEqual(1, resumo["ok"])
         self.assertEqual(1, resumo["total_cenarios"])
         self.assertEqual(1, resumo["total_dossies"])
         self.assertEqual(1, resumo["total_anexos"])
+
+    def test_sincroniza_dados_do_erp_sem_consultar_sefaz_novamente(self) -> None:
+        self.repo.upsert_consulta(
+            {
+                "cod_winthor": "100",
+                "gtin": "7891234567895",
+                "data_hora_resposta": "24/03/2026 10:00:00",
+                "status_sefaz": "9490",
+                "motivo_sefaz": "Consulta realizada com sucesso",
+                "ncm_winthor": "22041000",
+                "ncm_oficial": "22030000",
+                "divergencia_ncm": "DIVERGENTE: ERP(22041000) != GS1(22030000)",
+                "descricao_produto": "Produto GS1",
+                "descricao_erp": "",
+                "cest": "123",
+            }
+        )
+
+        resumo = self.repo.sincronizar_consultas_com_erp([("200", "7891234567895", "22030000", "Produto ERP atualizado")])
+        consulta = self.repo.obter_consulta_por_gtin("7891234567895")
+
+        self.assertEqual(1, resumo["atualizados"])
+        self.assertEqual(1, resumo["recalculados"])
+        self.assertEqual("200", consulta["cod_winthor"])
+        self.assertEqual("22030000", consulta["ncm_winthor"])
+        self.assertEqual("Produto ERP atualizado", consulta["descricao_erp"])
+        self.assertEqual("OK", consulta["divergencia_ncm"])
 
     def test_remove_duplicados_antes_de_persistir(self) -> None:
         duplicado = {
@@ -369,7 +405,9 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
         self.assertEqual(1, len(cenarios))
         self.assertEqual("22030000", cenarios[0]["ncm"])
         self.assertEqual("ABC123", cenarios[0]["cclasstrib"])
+        self.assertNotIn("descricao_erp", cenarios[0])
         self.assertEqual("Dossie legado", cenarios[0]["descricao_dossie"])
+        self.assertEqual("Dossie legado", repo.obter_dossie_cache("ABC123")["descricao"])
 
     def test_adiciona_colunas_novas_ao_dossie_sem_apagar_cache(self) -> None:
         db_path = self.temp_dir / "legacy_dossie.db"
@@ -389,6 +427,203 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
         self.assertEqual("Dossie legado", dossie["descricao"])
         self.assertIn("tipo_aliquota", dossie)
         self.assertEqual("", dossie["tipo_aliquota"])
+
+    def test_resumo_nao_conta_status_legado_nao_como_ok(self) -> None:
+        self.repo.upsert_consulta(
+            {
+                "cod_winthor": "100",
+                "gtin": "7891234567895",
+                "data_hora_resposta": "24/03/2026 10:00:00",
+                "status_sefaz": "9490",
+                "motivo_sefaz": "OK",
+                "ncm_winthor": "22030000",
+                "ncm_oficial": "22030000",
+                "divergencia_ncm": "NAO",
+                "descricao_produto": "Produto legado",
+                "descricao_erp": "Produto legado ERP",
+                "cest": "123",
+            }
+        )
+
+        resumo = self.repo.obter_resumo_estatistico()
+
+        self.assertEqual(1, resumo["total"])
+        self.assertEqual(0, resumo["ok"])
+
+    def test_listar_retorno_anexos_agrega_referencias_de_cenarios_por_anexo(self) -> None:
+        self.repo.salvar_anexos_tributarios([
+            {
+                "anexo": "VIII",
+                "descricao": "Anexo VIII",
+                "publicacao": "",
+                "inicio_vigencia": "",
+                "fim_vigencia": "",
+                "raw_json": "{}",
+                "especificidades": [
+                    {
+                        "codigo": "ESP-1",
+                        "descricao": "Especificidade 1",
+                        "valor": "A",
+                        "tipo": "texto",
+                        "publicacao": "",
+                        "inicio_vigencia": "",
+                        "fim_vigencia": "",
+                        "raw_json": "{}",
+                    }
+                ],
+            }
+        ])
+        self.repo.salvar_catalogo_tributario([
+            {
+                "cst": "060",
+                "descricao_cst": "CST A",
+                "ind_ibscbs": "1",
+                "ind_red_bc": "0",
+                "ind_red_aliq": "0",
+                "ind_transf_cred": "0",
+                "ind_dif": "0",
+                "ind_ajuste_compet": "0",
+                "ind_ibscbs_mono": "0",
+                "ind_cred_pres_ibs_zfm": "0",
+                "publicacao": "",
+                "inicio_vigencia": "",
+                "fim_vigencia": "",
+                "raw_json": "{}",
+                "classificacoes_tributarias": [
+                    {
+                        "cst": "060",
+                        "cclasstrib": "AAA001",
+                        "descricao": "Dossie A",
+                        "anexo": "VIII",
+                        "raw_json": "{}",
+                    }
+                ],
+            },
+            {
+                "cst": "061",
+                "descricao_cst": "CST B",
+                "ind_ibscbs": "1",
+                "ind_red_bc": "0",
+                "ind_red_aliq": "0",
+                "ind_transf_cred": "0",
+                "ind_dif": "0",
+                "ind_ajuste_compet": "0",
+                "ind_ibscbs_mono": "0",
+                "ind_cred_pres_ibs_zfm": "0",
+                "publicacao": "",
+                "inicio_vigencia": "",
+                "fim_vigencia": "",
+                "raw_json": "{}",
+                "classificacoes_tributarias": [
+                    {
+                        "cst": "061",
+                        "cclasstrib": "BBB002",
+                        "descricao": "Dossie B",
+                        "anexo": "VIII",
+                        "raw_json": "{}",
+                    }
+                ],
+            }
+        ])
+        self.repo.salvar_cenarios_tributarios(
+            "22030000",
+            [
+                {
+                    "ncm": "22030000",
+                    "cst": "060",
+                    "cclasstrib": "AAA001",
+                    "condicao_legal": "Uso geral",
+                    "fonte": "portal",
+                }
+            ],
+        )
+        self.repo.salvar_cenarios_tributarios(
+            "22040000",
+            [
+                {
+                    "ncm": "22040000",
+                    "cst": "061",
+                    "cclasstrib": "BBB002",
+                    "condicao_legal": "Uso especifico",
+                    "fonte": "portal",
+                }
+            ],
+        )
+        retorno = self.repo.listar_retorno_anexos({"anexo": "VIII"})
+
+        self.assertEqual(1, len(retorno))
+        self.assertEqual(2, retorno[0]["total_ncms_relacionados"])
+        self.assertEqual(2, retorno[0]["total_cenarios_relacionados"])
+        self.assertEqual("22030000,22040000", retorno[0]["ncms_relacionados"])
+        self.assertEqual("060,061", retorno[0]["csts_relacionados"])
+        self.assertEqual("AAA001,BBB002", retorno[0]["cclasstrib_relacionados"])
+        self.assertEqual("ESP-1", retorno[0]["codigo_especificidade"])
+
+
+    def test_salvar_feedback_analise_ia_rejeita_analise_inexistente(self) -> None:
+        with self.assertRaises(ValueError):
+            self.repo.salvar_feedback_analise_ia(9999, "CONFIRMADO")
+
+
+    def test_salvar_cenarios_persiste_base_mesmo_sem_dossie_previo(self) -> None:
+        self.repo.salvar_cenarios_tributarios(
+            "33061000",
+            [
+                {
+                    "ncm": "33061000",
+                    "cst": "200",
+                    "cclasstrib": "200035",
+                    "condicao_legal": "Uso geral",
+                    "fonte": "portal",
+                }
+            ],
+        )
+
+        dossie = self.repo.obter_dossie_cache("200035")
+        cenarios = self.repo.listar_cenarios_tributarios({"ncm": "33061000"})
+
+        self.assertIsNone(dossie)
+        self.assertEqual(1, len(cenarios))
+        self.assertEqual("", cenarios[0]["descricao_dossie"])
+        self.assertEqual("", cenarios[0]["anexo"])
+
+
+    def test_listar_consultas_por_ncm_retorna_mais_recentes(self) -> None:
+        self.repo.upsert_consulta(
+            {
+                "cod_winthor": "10",
+                "gtin": "7891234567895",
+                "data_hora_resposta": "24/03/2026 10:00:00",
+                "status_sefaz": "9490",
+                "motivo_sefaz": "OK",
+                "ncm_winthor": "22030000",
+                "ncm_oficial": "22030000",
+                "divergencia_ncm": "OK",
+                "descricao_produto": "Produto 1",
+                "descricao_erp": "ERP 1",
+                "cest": "123",
+            }
+        )
+        self.repo.upsert_consulta(
+            {
+                "cod_winthor": "11",
+                "gtin": "7891234567896",
+                "data_hora_resposta": "25/03/2026 11:00:00",
+                "status_sefaz": "9490",
+                "motivo_sefaz": "OK",
+                "ncm_winthor": "22030000",
+                "ncm_oficial": "22030000",
+                "divergencia_ncm": "OK",
+                "descricao_produto": "Produto 2",
+                "descricao_erp": "ERP 2",
+                "cest": "124",
+            }
+        )
+
+        consultas = self.repo.listar_consultas_por_ncm("22030000", limit=1)
+
+        self.assertEqual(1, len(consultas))
+        self.assertEqual("7891234567896", consultas[0]["gtin"])
 
 
 if __name__ == "__main__":

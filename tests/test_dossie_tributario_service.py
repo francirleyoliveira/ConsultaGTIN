@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from app.config import Settings
 from app.services.dossie_tributario_service import DossieTributarioService
@@ -44,6 +45,19 @@ class DossieTributarioServiceTest(unittest.TestCase):
         self.assertEqual("VIII", classificacao["anexo"])
         self.assertEqual("1", classificacao["ind_nfe"])
         self.assertEqual("https://exemplo.local/base-legal", classificacao["base_legal"])
+
+    @patch('app.services.dossie_tributario_service.get')
+    def test_consulta_api_respeita_configuracao_ssl(self, get_mock) -> None:
+        resposta = Mock()
+        resposta.raise_for_status.return_value = None
+        resposta.json.return_value = []
+        get_mock.return_value = resposta
+        settings = Settings(None, None, None, None, None, None, ssl_verify=False)
+
+        service = DossieTributarioService(settings)
+        service.sincronizar_catalogo()
+
+        self.assertFalse(get_mock.call_args.kwargs['verify'])
 
 
 if __name__ == "__main__":

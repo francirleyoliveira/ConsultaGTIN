@@ -18,6 +18,7 @@ customtkinter
 
 # Para modulo B (scraping do Portal Conformidade)
 selenium
+lxml
 
 # Para modulo C (cliente SOAP/WSDL)
 zeep

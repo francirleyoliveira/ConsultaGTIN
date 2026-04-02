@@ -4,6 +4,7 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 
 
+
 def analisar_resposta_xml(xml_texto: str) -> dict[str, str]:
     """Extrai os principais campos da resposta XML da Sefaz."""
     retorno = {
@@ -35,8 +36,7 @@ def analisar_resposta_xml(xml_texto: str) -> dict[str, str]:
                 dh_resp = mapa_tags.get("dhResp")
                 if dh_resp:
                     try:
-                        dt_iso = dh_resp.split("-03:00")[0].split("+")[0]
-                        dt_obj = datetime.fromisoformat(dt_iso)
+                        dt_obj = datetime.fromisoformat(dh_resp.replace("Z", "+00:00"))
                         retorno["data_hora"] = dt_obj.strftime("%d/%m/%Y %H:%M:%S")
                     except ValueError:
                         retorno["data_hora"] = dh_resp

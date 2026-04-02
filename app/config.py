@@ -20,6 +20,13 @@ CFF_API_PADRAO = "https://cff.svrs.rs.gov.br/api/v1/consultas/classTrib"
 CFF_ANEXOS_API_PADRAO = "https://cff.svrs.rs.gov.br/api/v1/consultas/anexos"
 
 
+def _parse_bool_env(nome: str, padrao: bool) -> bool:
+    valor = os.getenv(nome)
+    if valor is None:
+        return padrao
+    return valor.strip().lower() not in {"0", "false", "no", "nao", "não", "off"}
+
+
 @dataclass(frozen=True)
 class Settings:
     db_user: str | None
@@ -35,6 +42,22 @@ class Settings:
     cff_anexos_api_url: str = CFF_ANEXOS_API_PADRAO
     cff_resposta_exemplo_path: str | None = None
     cff_anexos_resposta_exemplo_path: str | None = None
+    gtin_healthcheck_gtin: str = "7891032015604"
+    gtin_healthcheck_timeout_seconds: int = 12
+    gtin_healthcheck_ttl_seconds: int = 300
+    gtin_circuit_breaker_seconds: int = 180
+    gtin_circuit_breaker_failures: int = 2
+    ssl_verify: bool = True
+    ssl_ca_bundle: str | None = None
+    ai_enabled: bool = True
+    ai_provider: str = "heuristic"
+    ai_model: str = "tax-scenario-heuristic-v1"
+    ai_prompt_version: str = "tax-scenario-v1"
+
+    @property
+    def requests_verify(self) -> bool | str:
+        return self.ssl_ca_bundle or self.ssl_verify
+
 
 
 def load_settings() -> Settings:
@@ -52,7 +75,19 @@ def load_settings() -> Settings:
         cff_anexos_api_url=os.getenv("CFF_ANEXOS_API_URL", CFF_ANEXOS_API_PADRAO),
         cff_resposta_exemplo_path=os.getenv("CFF_RESPOSTA_EXEMPLO_PATH"),
         cff_anexos_resposta_exemplo_path=os.getenv("CFF_ANEXOS_RESPOSTA_EXEMPLO_PATH"),
+        gtin_healthcheck_gtin=os.getenv("GTIN_HEALTHCHECK_GTIN", "7891032015604"),
+        gtin_healthcheck_timeout_seconds=int(os.getenv("GTIN_HEALTHCHECK_TIMEOUT_SECONDS", "12")),
+        gtin_healthcheck_ttl_seconds=int(os.getenv("GTIN_HEALTHCHECK_TTL_SECONDS", "300")),
+        gtin_circuit_breaker_seconds=int(os.getenv("GTIN_CIRCUIT_BREAKER_SECONDS", "180")),
+        gtin_circuit_breaker_failures=int(os.getenv("GTIN_CIRCUIT_BREAKER_FAILURES", "2")),
+        ssl_verify=_parse_bool_env("SSL_VERIFY", True),
+        ssl_ca_bundle=os.getenv("SSL_CA_BUNDLE") or None,
+        ai_enabled=_parse_bool_env("AI_ENABLED", True),
+        ai_provider=os.getenv("AI_PROVIDER", "heuristic"),
+        ai_model=os.getenv("AI_MODEL", "tax-scenario-heuristic-v1"),
+        ai_prompt_version=os.getenv("AI_PROMPT_VERSION", "tax-scenario-v1"),
     )
+
 
 
 def ensure_output_dirs() -> None:

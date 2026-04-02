@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from contextlib import closing
 from pathlib import Path
 
 import oracledb
@@ -7,7 +9,9 @@ import oracledb
 from app.config import QUERIES_DIR, Settings
 
 
+logger = logging.getLogger(__name__)
 _oracle_client_iniciado = False
+
 
 
 def inicializar_oracle_client(settings: Settings) -> None:
@@ -19,9 +23,20 @@ def inicializar_oracle_client(settings: Settings) -> None:
     try:
         oracledb.init_oracle_client(lib_dir=settings.oracle_client_caminho)
     except Exception:
-        pass
-    finally:
-        _oracle_client_iniciado = True
+        logger.warning(
+            "Falha ao inicializar Oracle Client; uma nova tentativa sera feita na proxima consulta.",
+            exc_info=True,
+        )
+        return
+
+    _oracle_client_iniciado = True
+
+
+
+def _carregar_sql_consulta() -> str:
+    caminho_sql = Path(QUERIES_DIR) / "consulta_gtins.sql"
+    return caminho_sql.read_text(encoding="utf-8")
+
 
 
 def buscar_gtins_winthor(settings: Settings):
@@ -29,20 +44,15 @@ def buscar_gtins_winthor(settings: Settings):
     inicializar_oracle_client(settings)
 
     try:
-        conexao = oracledb.connect(
-            user=settings.db_user,
-            password=settings.db_pass,
-            dsn=settings.db_dsn,
-        )
-        cursor = conexao.cursor()
-        caminho_sql = Path(QUERIES_DIR) / "consulta_gtins.sql"
-        with open(caminho_sql, "r", encoding="utf-8") as arquivo_sql:
-            sql = arquivo_sql.read()
-        cursor.execute(sql)
-        produtos = cursor.fetchall()
-        cursor.close()
-        conexao.close()
-        return produtos
-    except Exception as erro:
-        print(f"Erro DB: {erro}")
+        with closing(
+            oracledb.connect(
+                user=settings.db_user,
+                password=settings.db_pass,
+                dsn=settings.db_dsn,
+            )
+        ) as conexao, closing(conexao.cursor()) as cursor:
+            cursor.execute(_carregar_sql_consulta())
+            return cursor.fetchall()
+    except Exception:
+        logger.exception("Falha ao consultar GTINs no Oracle Winthor.")
         return []

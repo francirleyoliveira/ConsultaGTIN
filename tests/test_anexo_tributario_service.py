@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock, patch
 
 from app.config import Settings
 from app.services.anexo_tributario_service import AnexoTributarioService
@@ -62,6 +63,19 @@ class AnexoTributarioServiceTest(unittest.TestCase):
         self.assertEqual("105049000", anexos[0]["especificidades"][0]["codigo"])
         self.assertEqual("Servico de transporte multimodal", anexos[0]["especificidades"][0]["descricao"])
         self.assertEqual("Transporte", anexos[0]["especificidades"][0]["valor"])
+
+    @patch('app.services.anexo_tributario_service.get')
+    def test_consulta_api_respeita_configuracao_ssl(self, get_mock) -> None:
+        resposta = Mock()
+        resposta.raise_for_status.return_value = None
+        resposta.json.return_value = []
+        get_mock.return_value = resposta
+        settings = Settings(None, None, None, None, None, None, ssl_ca_bundle='C:/certs/ca.pem')
+
+        service = AnexoTributarioService(settings)
+        service.sincronizar_anexos()
+
+        self.assertEqual('C:/certs/ca.pem', get_mock.call_args.kwargs['verify'])
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ class AnexoTributarioService:
                 pkcs12_filename=self.settings.cert_caminho,
                 pkcs12_password=self.settings.cert_senha,
                 timeout=30,
-                verify=False,
+                verify=self.settings.requests_verify,
             )
             resposta.raise_for_status()
             return self._normalizar_anexos(resposta.json())

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import SQLITE_DB_PATH, ensure_output_dirs
+from app.validators.gtin import comparar_ncm
 
 
 CREATE_TABLES_SQL = [
@@ -22,6 +23,7 @@ CREATE_TABLES_SQL = [
         ncm_oficial TEXT,
         divergencia_ncm TEXT,
         descricao_produto TEXT,
+        descricao_erp TEXT,
         cest TEXT,
         ultima_atualizacao TEXT NOT NULL,
         ultima_atualizacao_ordem TEXT NOT NULL DEFAULT ''
@@ -114,29 +116,53 @@ CREATE_TABLES_SQL = [
         FOREIGN KEY(anexo) REFERENCES anexos_tributarios(anexo)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_analises (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        tipo_contexto TEXT NOT NULL,
+        chave_contexto TEXT NOT NULL,
+        contexto_hash TEXT NOT NULL,
+        origem_contexto TEXT,
+        provider TEXT NOT NULL,
+        model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL,
+        status_execucao TEXT NOT NULL,
+        score_confianca REAL,
+        recomendacao_cst TEXT,
+        recomendacao_cclasstrib TEXT,
+        requer_revisao_humana TEXT NOT NULL DEFAULT 'S',
+        resumo TEXT,
+        resultado_json TEXT NOT NULL,
+        criado_em TEXT NOT NULL,
+        atualizado_em TEXT NOT NULL,
+        UNIQUE(tipo_contexto, chave_contexto, contexto_hash, prompt_version)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS ai_feedback_analista (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        analise_id INTEGER NOT NULL,
+        decisao TEXT NOT NULL,
+        cst_final TEXT,
+        cclasstrib_final TEXT,
+        observacao TEXT,
+        criado_em TEXT NOT NULL,
+        FOREIGN KEY(analise_id) REFERENCES ai_analises(id)
+    )
+    """,
 ]
 
 
 CREATE_CENARIOS_SQL = """
-CREATE TABLE IF NOT EXISTS cenarios_tributarios (
+CREATE TABLE IF NOT EXISTS cenarios_ncm_base (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ncm TEXT NOT NULL,
     cst TEXT,
     cclasstrib TEXT NOT NULL,
     condicao_legal TEXT,
-    descricao_dossie TEXT,
-    p_red_ibs TEXT,
-    p_red_cbs TEXT,
-    publicacao TEXT,
-    inicio_vigencia TEXT,
-    anexo TEXT,
-    ind_nfe TEXT,
-    ind_nfce TEXT,
-    base_legal TEXT,
     fonte TEXT,
     ultima_atualizacao TEXT NOT NULL,
-    UNIQUE(ncm, cclasstrib, cst, condicao_legal),
-    FOREIGN KEY(cclasstrib) REFERENCES dossie_classtrib(cclasstrib)
+    UNIQUE(ncm, cclasstrib, cst, condicao_legal)
 )
 """
 
@@ -146,13 +172,18 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_consultas_ncm_winthor ON consultas_gtin(ncm_winthor)",
     "CREATE INDEX IF NOT EXISTS idx_consultas_ncm_oficial ON consultas_gtin(ncm_oficial)",
     "CREATE INDEX IF NOT EXISTS idx_consultas_atualizacao ON consultas_gtin(ultima_atualizacao_ordem)",
+    "CREATE INDEX IF NOT EXISTS idx_consultas_ncm_atualizacao ON consultas_gtin(ncm_winthor, ultima_atualizacao_ordem DESC)",
     "CREATE INDEX IF NOT EXISTS idx_catalogo_cst_publicacao ON catalogo_cst_tributario(publicacao)",
     "CREATE INDEX IF NOT EXISTS idx_dossie_cst ON dossie_classtrib(cst)",
     "CREATE INDEX IF NOT EXISTS idx_anexos_publicacao ON anexos_tributarios(publicacao)",
     "CREATE INDEX IF NOT EXISTS idx_anexos_especificidades_anexo ON anexos_especificidades(anexo)",
-    "CREATE INDEX IF NOT EXISTS idx_cenarios_ncm ON cenarios_tributarios(ncm)",
-    "CREATE INDEX IF NOT EXISTS idx_cenarios_cst ON cenarios_tributarios(cst)",
-    "CREATE INDEX IF NOT EXISTS idx_cenarios_cclasstrib ON cenarios_tributarios(cclasstrib)",
+    "CREATE INDEX IF NOT EXISTS idx_cenarios_base_ncm ON cenarios_ncm_base(ncm)",
+    "CREATE INDEX IF NOT EXISTS idx_cenarios_base_cst ON cenarios_ncm_base(cst)",
+    "CREATE INDEX IF NOT EXISTS idx_cenarios_base_cclasstrib ON cenarios_ncm_base(cclasstrib)",
+    "CREATE INDEX IF NOT EXISTS idx_cenarios_base_ncm_cst ON cenarios_ncm_base(ncm, cst)",
+    "CREATE INDEX IF NOT EXISTS idx_cenarios_base_ncm_cclasstrib ON cenarios_ncm_base(ncm, cclasstrib)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_analises_contexto ON ai_analises(tipo_contexto, chave_contexto, atualizado_em)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_feedback_analise ON ai_feedback_analista(analise_id)",
 ]
 
 
@@ -161,15 +192,6 @@ CENARIOS_COLUMN_DEFS = [
     ("cst", "TEXT DEFAULT ''"),
     ("cclasstrib", "TEXT NOT NULL DEFAULT ''"),
     ("condicao_legal", "TEXT"),
-    ("descricao_dossie", "TEXT"),
-    ("p_red_ibs", "TEXT DEFAULT ''"),
-    ("p_red_cbs", "TEXT DEFAULT ''"),
-    ("publicacao", "TEXT DEFAULT ''"),
-    ("inicio_vigencia", "TEXT DEFAULT ''"),
-    ("anexo", "TEXT DEFAULT ''"),
-    ("ind_nfe", "TEXT DEFAULT ''"),
-    ("ind_nfce", "TEXT DEFAULT ''"),
-    ("base_legal", "TEXT DEFAULT ''"),
     ("fonte", "TEXT"),
     ("ultima_atualizacao", "TEXT NOT NULL DEFAULT ''"),
 ]
@@ -224,6 +246,7 @@ class ConsultaGtinRepository:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
         return conn
 
     @contextmanager
@@ -231,6 +254,9 @@ class ConsultaGtinRepository:
         conn = self._connect()
         try:
             yield conn
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -250,21 +276,20 @@ class ConsultaGtinRepository:
         colunas = {row[1] for row in conn.execute("PRAGMA table_info(consultas_gtin)").fetchall()}
         if "ultima_atualizacao_ordem" not in colunas:
             conn.execute("ALTER TABLE consultas_gtin ADD COLUMN ultima_atualizacao_ordem TEXT NOT NULL DEFAULT ''")
+        if "descricao_erp" not in colunas:
+            conn.execute("ALTER TABLE consultas_gtin ADD COLUMN descricao_erp TEXT NOT NULL DEFAULT ''")
 
     def _garantir_schema_cenarios(self, conn: sqlite3.Connection) -> None:
-        existe = conn.execute(
+        conn.execute(CREATE_CENARIOS_SQL)
+        existe_legado = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='cenarios_tributarios'"
         ).fetchone()
-        if not existe:
-            conn.execute(CREATE_CENARIOS_SQL)
-            return
-        colunas = {row[1] for row in conn.execute("PRAGMA table_info(cenarios_tributarios)").fetchall()}
-        if "gtin" in colunas or "ncm" not in colunas:
+        if existe_legado:
             self._migrar_cenarios_legacy(conn)
-            return
+        colunas = {row[1] for row in conn.execute("PRAGMA table_info(cenarios_ncm_base)").fetchall()}
         for coluna, definicao in CENARIOS_COLUMN_DEFS:
             if coluna not in colunas:
-                conn.execute(f"ALTER TABLE cenarios_tributarios ADD COLUMN {coluna} {definicao}")
+                conn.execute(f"ALTER TABLE cenarios_ncm_base ADD COLUMN {coluna} {definicao}")
 
     def _garantir_schema_dossie(self, conn: sqlite3.Connection) -> None:
         colunas = {row[1] for row in conn.execute("PRAGMA table_info(dossie_classtrib)").fetchall()}
@@ -276,7 +301,6 @@ class ConsultaGtinRepository:
         legacy = "cenarios_tributarios_legacy"
         conn.execute(f"DROP TABLE IF EXISTS {legacy}")
         conn.execute(f"ALTER TABLE cenarios_tributarios RENAME TO {legacy}")
-        conn.execute(CREATE_CENARIOS_SQL)
 
         colunas_origem = {row[1] for row in conn.execute(f"PRAGMA table_info({legacy})").fetchall()}
 
@@ -291,20 +315,19 @@ class ConsultaGtinRepository:
         partes_ncm_sql = partes_ncm + ["''"]
         ncm_expr = f"COALESCE({', '.join(partes_ncm_sql)})" if partes_ncm else "''"
         cclasstrib_expr = expr("cclasstrib")
+        cst_expr = expr("cst")
+        ultima_atualizacao_expr = expr("ultima_atualizacao", "strftime('%d/%m/%Y %H:%M:%S', 'now')")
         join_consultas = "LEFT JOIN consultas_gtin consultas ON consultas.gtin = legacy.gtin" if "gtin" in colunas_origem else ""
 
         conn.execute(
             f"""
-            INSERT OR IGNORE INTO cenarios_tributarios (
-                ncm, cst, cclasstrib, condicao_legal, descricao_dossie,
-                p_red_ibs, p_red_cbs, publicacao, inicio_vigencia, anexo,
-                ind_nfe, ind_nfce, base_legal, fonte, ultima_atualizacao
+            INSERT INTO dossie_classtrib (
+                cclasstrib, cst, descricao, p_red_ibs, p_red_cbs, publicacao,
+                inicio_vigencia, anexo, ind_nfe, ind_nfce, base_legal, raw_json, ultima_atualizacao
             )
-            SELECT
-                {ncm_expr},
-                {expr('cst')},
+            SELECT DISTINCT
                 {cclasstrib_expr},
-                {expr('condicao_legal')},
+                {cst_expr},
                 {expr('descricao_dossie')},
                 {expr('p_red_ibs')},
                 {expr('p_red_cbs')},
@@ -314,8 +337,37 @@ class ConsultaGtinRepository:
                 {expr('ind_nfe')},
                 {expr('ind_nfce')},
                 {expr('base_legal')},
+                '{{}}',
+                {ultima_atualizacao_expr}
+            FROM {legacy} legacy
+            {join_consultas}
+            WHERE TRIM({cclasstrib_expr}) <> ''
+            ON CONFLICT(cclasstrib) DO UPDATE SET
+                cst = CASE WHEN TRIM(COALESCE(dossie_classtrib.cst, '')) = '' THEN excluded.cst ELSE dossie_classtrib.cst END,
+                descricao = CASE WHEN TRIM(COALESCE(dossie_classtrib.descricao, '')) = '' THEN excluded.descricao ELSE dossie_classtrib.descricao END,
+                p_red_ibs = CASE WHEN TRIM(COALESCE(dossie_classtrib.p_red_ibs, '')) = '' THEN excluded.p_red_ibs ELSE dossie_classtrib.p_red_ibs END,
+                p_red_cbs = CASE WHEN TRIM(COALESCE(dossie_classtrib.p_red_cbs, '')) = '' THEN excluded.p_red_cbs ELSE dossie_classtrib.p_red_cbs END,
+                publicacao = CASE WHEN TRIM(COALESCE(dossie_classtrib.publicacao, '')) = '' THEN excluded.publicacao ELSE dossie_classtrib.publicacao END,
+                inicio_vigencia = CASE WHEN TRIM(COALESCE(dossie_classtrib.inicio_vigencia, '')) = '' THEN excluded.inicio_vigencia ELSE dossie_classtrib.inicio_vigencia END,
+                anexo = CASE WHEN TRIM(COALESCE(dossie_classtrib.anexo, '')) = '' THEN excluded.anexo ELSE dossie_classtrib.anexo END,
+                ind_nfe = CASE WHEN TRIM(COALESCE(dossie_classtrib.ind_nfe, '')) = '' THEN excluded.ind_nfe ELSE dossie_classtrib.ind_nfe END,
+                ind_nfce = CASE WHEN TRIM(COALESCE(dossie_classtrib.ind_nfce, '')) = '' THEN excluded.ind_nfce ELSE dossie_classtrib.ind_nfce END,
+                base_legal = CASE WHEN TRIM(COALESCE(dossie_classtrib.base_legal, '')) = '' THEN excluded.base_legal ELSE dossie_classtrib.base_legal END
+            """
+        )
+
+        conn.execute(
+            f"""
+            INSERT OR IGNORE INTO cenarios_ncm_base (
+                ncm, cst, cclasstrib, condicao_legal, fonte, ultima_atualizacao
+            )
+            SELECT
+                {ncm_expr},
+                {cst_expr},
+                {cclasstrib_expr},
+                {expr('condicao_legal')},
                 {expr('fonte')},
-                {expr('ultima_atualizacao', "strftime('%d/%m/%Y %H:%M:%S', 'now')")}
+                {ultima_atualizacao_expr}
             FROM {legacy} legacy
             {join_consultas}
             WHERE TRIM({cclasstrib_expr}) <> ''
@@ -357,6 +409,7 @@ class ConsultaGtinRepository:
             "ncm_oficial": registro.get("ncm_oficial", "") or "",
             "divergencia_ncm": registro.get("divergencia_ncm", "") or "",
             "descricao_produto": registro.get("descricao_produto", "") or "",
+            "descricao_erp": registro.get("descricao_erp", "") or "",
             "cest": registro.get("cest", "") or "",
             "ultima_atualizacao": agora.strftime("%d/%m/%Y %H:%M:%S"),
             "ultima_atualizacao_ordem": agora.strftime("%Y-%m-%d %H:%M:%S"),
@@ -366,11 +419,11 @@ class ConsultaGtinRepository:
                 """
                 INSERT INTO consultas_gtin (
                     gtin, cod_winthor, data_hora_resposta, status_sefaz, motivo_sefaz,
-                    ncm_winthor, ncm_oficial, divergencia_ncm, descricao_produto, cest,
+                    ncm_winthor, ncm_oficial, divergencia_ncm, descricao_produto, descricao_erp, cest,
                     ultima_atualizacao, ultima_atualizacao_ordem
                 ) VALUES (
                     :gtin, :cod_winthor, :data_hora_resposta, :status_sefaz, :motivo_sefaz,
-                    :ncm_winthor, :ncm_oficial, :divergencia_ncm, :descricao_produto, :cest,
+                    :ncm_winthor, :ncm_oficial, :divergencia_ncm, :descricao_produto, :descricao_erp, :cest,
                     :ultima_atualizacao, :ultima_atualizacao_ordem
                 )
                 ON CONFLICT(gtin) DO UPDATE SET
@@ -382,6 +435,7 @@ class ConsultaGtinRepository:
                     ncm_oficial = excluded.ncm_oficial,
                     divergencia_ncm = excluded.divergencia_ncm,
                     descricao_produto = excluded.descricao_produto,
+                    descricao_erp = excluded.descricao_erp,
                     cest = excluded.cest,
                     ultima_atualizacao = excluded.ultima_atualizacao,
                     ultima_atualizacao_ordem = excluded.ultima_atualizacao_ordem
@@ -389,6 +443,261 @@ class ConsultaGtinRepository:
                 payload,
             )
             conn.commit()
+
+    def sincronizar_consultas_com_erp(self, produtos_erp: list[tuple[Any, ...]], chunk_size: int = 900) -> dict[str, int]:
+        produtos_por_gtin: dict[str, dict[str, str]] = {}
+        for produto in produtos_erp:
+            gtin = str(produto[1] or "").strip() if len(produto) > 1 else ""
+            if not gtin:
+                continue
+            produtos_por_gtin[gtin] = {
+                "cod_winthor": str(produto[0] or "") if len(produto) > 0 else "",
+                "ncm_winthor": "".join(filter(str.isdigit, str(produto[2] or ""))) if len(produto) > 2 else "",
+                "descricao_erp": str(produto[3] or "") if len(produto) > 3 else "",
+            }
+
+        if not produtos_por_gtin:
+            return {"recebidos": 0, "atualizados": 0, "recalculados": 0}
+
+        gtins = list(produtos_por_gtin.keys())
+        atualizados = 0
+        recalculados = 0
+
+        with self._managed_conn() as conn:
+            for inicio in range(0, len(gtins), chunk_size):
+                lote = gtins[inicio : inicio + chunk_size]
+                placeholders = ",".join("?" for _ in lote)
+                rows = conn.execute(
+                    f"""
+                    SELECT gtin, ncm_oficial, divergencia_ncm
+                    FROM consultas_gtin
+                    WHERE gtin IN ({placeholders})
+                    """,
+                    lote,
+                ).fetchall()
+
+                for row in rows:
+                    gtin = str(row["gtin"] or "")
+                    dados_erp = produtos_por_gtin[gtin]
+                    ncm_oficial = "".join(filter(str.isdigit, str(row["ncm_oficial"] or "")))
+                    divergencia_nova = str(row["divergencia_ncm"] or "")
+                    if ncm_oficial:
+                        divergencia_nova = comparar_ncm(dados_erp["ncm_winthor"], ncm_oficial)
+                        recalculados += 1
+
+                    conn.execute(
+                        """
+                        UPDATE consultas_gtin
+                        SET cod_winthor = ?,
+                            ncm_winthor = ?,
+                            descricao_erp = ?,
+                            divergencia_ncm = ?
+                        WHERE gtin = ?
+                        """,
+                        (
+                            dados_erp["cod_winthor"],
+                            dados_erp["ncm_winthor"],
+                            dados_erp["descricao_erp"],
+                            divergencia_nova,
+                            gtin,
+                        ),
+                    )
+                    atualizados += 1
+
+            conn.commit()
+
+        return {
+            "recebidos": len(produtos_por_gtin),
+            "atualizados": atualizados,
+            "recalculados": recalculados,
+        }
+
+    def obter_consulta_por_gtin(self, gtin: str) -> dict[str, Any] | None:
+        codigo = str(gtin or "").strip()
+        if not codigo:
+            return None
+        with self._managed_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM consultas_gtin WHERE gtin = ?",
+                (codigo,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def obter_ultima_consulta_por_ncm(self, ncm: str) -> dict[str, Any] | None:
+        ncm_limpo = "".join(filter(str.isdigit, str(ncm or "")))
+        if not ncm_limpo:
+            return None
+        with self._managed_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM consultas_gtin
+                WHERE ncm_winthor = ? OR ncm_oficial = ?
+                ORDER BY ultima_atualizacao_ordem DESC, rowid DESC, gtin ASC
+                LIMIT 1
+                """,
+                (ncm_limpo, ncm_limpo),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def listar_consultas_por_ncm(self, ncm: str, limit: int | None = None) -> list[dict[str, Any]]:
+        ncm_limpo = "".join(filter(str.isdigit, str(ncm or "")))
+        if not ncm_limpo:
+            return []
+        sql = """
+            SELECT *
+            FROM consultas_gtin
+            WHERE ncm_winthor = ? OR ncm_oficial = ?
+            ORDER BY ultima_atualizacao_ordem DESC, rowid DESC, gtin ASC
+        """
+        params: list[Any] = [ncm_limpo, ncm_limpo]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(int(limit), 1))
+        with self._managed_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def salvar_analise_ia(self, registro: dict[str, Any]) -> int:
+        agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        resultado_json = registro.get("resultado_json", {})
+        if not isinstance(resultado_json, str):
+            resultado_json = json.dumps(resultado_json, ensure_ascii=False)
+        payload = {
+            "tipo_contexto": str(registro.get("tipo_contexto", "") or "").strip(),
+            "chave_contexto": str(registro.get("chave_contexto", "") or "").strip(),
+            "contexto_hash": str(registro.get("contexto_hash", "") or "").strip(),
+            "origem_contexto": str(registro.get("origem_contexto", "sqlite") or "sqlite"),
+            "provider": str(registro.get("provider", "heuristic") or "heuristic"),
+            "model": str(registro.get("model", "tax-scenario-heuristic-v1") or "tax-scenario-heuristic-v1"),
+            "prompt_version": str(registro.get("prompt_version", "tax-scenario-v1") or "tax-scenario-v1"),
+            "status_execucao": str(registro.get("status_execucao", "CONCLUIDA") or "CONCLUIDA"),
+            "score_confianca": registro.get("score_confianca"),
+            "recomendacao_cst": str(registro.get("recomendacao_cst", "") or ""),
+            "recomendacao_cclasstrib": str(registro.get("recomendacao_cclasstrib", "") or ""),
+            "requer_revisao_humana": str(registro.get("requer_revisao_humana", "S") or "S"),
+            "resumo": str(registro.get("resumo", "") or ""),
+            "resultado_json": resultado_json,
+            "criado_em": agora,
+            "atualizado_em": agora,
+        }
+        with self._managed_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO ai_analises (
+                    tipo_contexto, chave_contexto, contexto_hash, origem_contexto, provider,
+                    model, prompt_version, status_execucao, score_confianca, recomendacao_cst,
+                    recomendacao_cclasstrib, requer_revisao_humana, resumo, resultado_json,
+                    criado_em, atualizado_em
+                ) VALUES (
+                    :tipo_contexto, :chave_contexto, :contexto_hash, :origem_contexto, :provider,
+                    :model, :prompt_version, :status_execucao, :score_confianca, :recomendacao_cst,
+                    :recomendacao_cclasstrib, :requer_revisao_humana, :resumo, :resultado_json,
+                    :criado_em, :atualizado_em
+                )
+                ON CONFLICT(tipo_contexto, chave_contexto, contexto_hash, prompt_version) DO UPDATE SET
+                    origem_contexto = excluded.origem_contexto,
+                    provider = excluded.provider,
+                    model = excluded.model,
+                    status_execucao = excluded.status_execucao,
+                    score_confianca = excluded.score_confianca,
+                    recomendacao_cst = excluded.recomendacao_cst,
+                    recomendacao_cclasstrib = excluded.recomendacao_cclasstrib,
+                    requer_revisao_humana = excluded.requer_revisao_humana,
+                    resumo = excluded.resumo,
+                    resultado_json = excluded.resultado_json,
+                    atualizado_em = excluded.atualizado_em
+                """,
+                payload,
+            )
+            row = conn.execute(
+                """
+                SELECT id
+                FROM ai_analises
+                WHERE tipo_contexto = ? AND chave_contexto = ? AND contexto_hash = ? AND prompt_version = ?
+                LIMIT 1
+                """,
+                (
+                    payload["tipo_contexto"],
+                    payload["chave_contexto"],
+                    payload["contexto_hash"],
+                    payload["prompt_version"],
+                ),
+            ).fetchone()
+            conn.commit()
+        return int(row["id"]) if row else 0
+
+    def obter_analise_ia(self, analise_id: int) -> dict[str, Any] | None:
+        with self._managed_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM ai_analises WHERE id = ?",
+                (int(analise_id),),
+            ).fetchone()
+        if not row:
+            return None
+        registro = dict(row)
+        try:
+            registro["resultado_json"] = json.loads(registro.get("resultado_json") or "{}")
+        except json.JSONDecodeError:
+            registro["resultado_json"] = {}
+        return registro
+
+    def listar_analises_ia(self, filtros: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        filtros = filtros or {}
+        sql = "SELECT * FROM ai_analises WHERE 1=1"
+        params: list[str] = []
+        for campo_sql, campo_filtro in (("tipo_contexto", "tipo_contexto"), ("chave_contexto", "chave_contexto"), ("provider", "provider")):
+            valor = str(filtros.get(campo_filtro, "") or "").strip()
+            if valor:
+                sql += f" AND {campo_sql} LIKE ?"
+                params.append(f"%{valor}%")
+        sql += " ORDER BY atualizado_em DESC, id DESC"
+        with self._managed_conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        registros: list[dict[str, Any]] = []
+        for row in rows:
+            registro = dict(row)
+            try:
+                registro["resultado_json"] = json.loads(registro.get("resultado_json") or "{}")
+            except json.JSONDecodeError:
+                registro["resultado_json"] = {}
+            registros.append(registro)
+        return registros
+
+    def salvar_feedback_analise_ia(
+        self,
+        analise_id: int,
+        decisao: str,
+        cst_final: str = "",
+        cclasstrib_final: str = "",
+        observacao: str = "",
+    ) -> int:
+        agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+        with self._managed_conn() as conn:
+            existe = conn.execute(
+                "SELECT 1 FROM ai_analises WHERE id = ? LIMIT 1",
+                (int(analise_id),),
+            ).fetchone()
+            if not existe:
+                raise ValueError(f"Analise IA {analise_id} nao encontrada para registrar feedback.")
+            cursor = conn.execute(
+                """
+                INSERT INTO ai_feedback_analista (
+                    analise_id, decisao, cst_final, cclasstrib_final, observacao, criado_em
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (int(analise_id), decisao, cst_final, cclasstrib_final, observacao, agora),
+            )
+            conn.commit()
+            return int(cursor.lastrowid)
+
+    def listar_feedback_analise_ia(self, analise_id: int) -> list[dict[str, Any]]:
+        with self._managed_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM ai_feedback_analista WHERE analise_id = ? ORDER BY id ASC",
+                (int(analise_id),),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def salvar_catalogo_tributario(self, catalogo: list[dict[str, Any]]) -> None:
         agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
@@ -640,6 +949,53 @@ class ConsultaGtinRepository:
     def listar_retorno_anexos(self, filtros: dict | None = None) -> list[dict[str, Any]]:
         filtros = filtros or {}
         sql = """
+            WITH referencias_base AS (
+                SELECT
+                    c.ncm,
+                    c.cst,
+                    c.cclasstrib,
+                    d.anexo
+                FROM cenarios_ncm_base c
+                JOIN dossie_classtrib d ON d.cclasstrib = c.cclasstrib
+                WHERE TRIM(COALESCE(d.anexo, '')) <> ''
+            ),
+            totais_por_anexo AS (
+                SELECT
+                    anexo,
+                    COUNT(*) AS total_cenarios_relacionados,
+                    COUNT(DISTINCT ncm) AS total_ncms_relacionados
+                FROM referencias_base
+                GROUP BY anexo
+            ),
+            ncms_por_anexo AS (
+                SELECT anexo, GROUP_CONCAT(ncm) AS ncms_relacionados
+                FROM (
+                    SELECT DISTINCT anexo, ncm
+                    FROM referencias_base
+                    ORDER BY anexo, ncm
+                ) refs
+                GROUP BY anexo
+            ),
+            csts_por_anexo AS (
+                SELECT anexo, GROUP_CONCAT(cst) AS csts_relacionados
+                FROM (
+                    SELECT DISTINCT anexo, cst
+                    FROM referencias_base
+                    WHERE TRIM(COALESCE(cst, '')) <> ''
+                    ORDER BY anexo, cst
+                ) refs
+                GROUP BY anexo
+            ),
+            cclasstrib_por_anexo AS (
+                SELECT anexo, GROUP_CONCAT(cclasstrib) AS cclasstrib_relacionados
+                FROM (
+                    SELECT DISTINCT anexo, cclasstrib
+                    FROM referencias_base
+                    WHERE TRIM(COALESCE(cclasstrib, '')) <> ''
+                    ORDER BY anexo, cclasstrib
+                ) refs
+                GROUP BY anexo
+            )
             SELECT
                 a.anexo,
                 a.descricao,
@@ -647,6 +1003,11 @@ class ConsultaGtinRepository:
                 a.inicio_vigencia,
                 a.fim_vigencia,
                 a.ultima_atualizacao,
+                COALESCE(t.total_ncms_relacionados, 0) AS total_ncms_relacionados,
+                COALESCE(t.total_cenarios_relacionados, 0) AS total_cenarios_relacionados,
+                COALESCE(n.ncms_relacionados, '') AS ncms_relacionados,
+                COALESCE(cs.csts_relacionados, '') AS csts_relacionados,
+                COALESCE(cc.cclasstrib_relacionados, '') AS cclasstrib_relacionados,
                 e.codigo AS codigo_especificidade,
                 e.descricao AS descricao_especificidade,
                 e.valor,
@@ -655,6 +1016,10 @@ class ConsultaGtinRepository:
                 e.inicio_vigencia AS especificidade_inicio_vigencia,
                 e.fim_vigencia AS especificidade_fim_vigencia
             FROM anexos_tributarios a
+            LEFT JOIN totais_por_anexo t ON t.anexo = a.anexo
+            LEFT JOIN ncms_por_anexo n ON n.anexo = a.anexo
+            LEFT JOIN csts_por_anexo cs ON cs.anexo = a.anexo
+            LEFT JOIN cclasstrib_por_anexo cc ON cc.anexo = a.anexo
             LEFT JOIN anexos_especificidades e ON e.anexo = a.anexo
             WHERE 1=1
         """
@@ -675,6 +1040,41 @@ class ConsultaGtinRepository:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def _garantir_dossie_placeholder(
+        self,
+        conn: sqlite3.Connection,
+        cclasstrib: str,
+        cst: str = "",
+        descricao: str = "",
+        ultima_atualizacao: str | None = None,
+    ) -> None:
+        codigo = str(cclasstrib or "").strip()
+        if not codigo:
+            return
+        conn.execute(
+            """
+            INSERT INTO dossie_classtrib (
+                cclasstrib, cst, descricao, raw_json, ultima_atualizacao
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cclasstrib) DO UPDATE SET
+                cst = CASE
+                    WHEN TRIM(COALESCE(dossie_classtrib.cst, '')) = '' THEN excluded.cst
+                    ELSE dossie_classtrib.cst
+                END,
+                descricao = CASE
+                    WHEN TRIM(COALESCE(dossie_classtrib.descricao, '')) = '' THEN excluded.descricao
+                    ELSE dossie_classtrib.descricao
+                END
+            """,
+            (
+                codigo,
+                str(cst or "").strip(),
+                str(descricao or "").strip(),
+                "{}",
+                ultima_atualizacao or datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+            ),
+        )
+
     def salvar_cenarios_tributarios(self, ncm: str, cenarios: list[dict[str, Any]]) -> None:
         agora = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
         ncm_limpo = "".join(filter(str.isdigit, str(ncm or "")))
@@ -693,31 +1093,20 @@ class ConsultaGtinRepository:
             cenarios_unicos.append(cenario)
 
         with self._managed_conn() as conn:
-            conn.execute("DELETE FROM cenarios_tributarios WHERE ncm = ?", (ncm_limpo,))
+            conn.execute("DELETE FROM cenarios_ncm_base WHERE ncm = ?", (ncm_limpo,))
             for cenario in cenarios_unicos:
                 conn.execute(
                     """
-                    INSERT INTO cenarios_tributarios (
-                        ncm, cst, cclasstrib, condicao_legal, descricao_dossie,
-                        p_red_ibs, p_red_cbs, publicacao, inicio_vigencia, anexo,
-                        ind_nfe, ind_nfce, base_legal, fonte, ultima_atualizacao
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO cenarios_ncm_base (
+                        ncm, cst, cclasstrib, condicao_legal, fonte, ultima_atualizacao
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         ncm_limpo,
-                        cenario.get("cst", "") or "",
-                        cenario.get("cclasstrib", "") or "",
-                        cenario.get("condicao_legal", "") or "",
-                        cenario.get("descricao_dossie", "") or "",
-                        cenario.get("p_red_ibs", "") or "",
-                        cenario.get("p_red_cbs", "") or "",
-                        cenario.get("publicacao", "") or "",
-                        cenario.get("inicio_vigencia", "") or "",
-                        cenario.get("anexo", "") or "",
-                        cenario.get("ind_nfe", "") or "",
-                        cenario.get("ind_nfce", "") or "",
-                        cenario.get("base_legal", "") or "",
-                        cenario.get("fonte", "") or "",
+                        str(cenario.get("cst", "") or "").strip(),
+                        str(cenario.get("cclasstrib", "") or "").strip(),
+                        str(cenario.get("condicao_legal", "") or "").strip(),
+                        str(cenario.get("fonte", "") or "").strip(),
                         agora,
                     ),
                 )
@@ -727,11 +1116,15 @@ class ConsultaGtinRepository:
         filtros = filtros or {}
         sql = "SELECT * FROM consultas_gtin WHERE 1=1"
         params: list[str] = []
+        cod_winthor = (filtros.get("cod_winthor") or "").strip()
         gtin = (filtros.get("gtin") or "").strip()
         status = (filtros.get("status_sefaz") or "").strip()
         divergencia = (filtros.get("divergencia_ncm") or "").strip()
         ncm = (filtros.get("ncm") or "").strip()
         descricao = (filtros.get("descricao_produto") or "").strip()
+        if cod_winthor:
+            sql += " AND cod_winthor LIKE ?"
+            params.append(f"%{cod_winthor}%")
         if gtin:
             sql += " AND gtin LIKE ?"
             params.append(f"%{gtin}%")
@@ -745,9 +1138,9 @@ class ConsultaGtinRepository:
             sql += " AND (ncm_winthor LIKE ? OR ncm_oficial LIKE ?)"
             params.extend([f"%{ncm}%", f"%{ncm}%"])
         if descricao:
-            sql += " AND descricao_produto LIKE ?"
-            params.append(f"%{descricao}%")
-        sql += " ORDER BY ultima_atualizacao_ordem DESC, gtin ASC"
+            sql += " AND (descricao_produto LIKE ? OR descricao_erp LIKE ?)"
+            params.extend([f"%{descricao}%", f"%{descricao}%"])
+        sql += " ORDER BY ultima_atualizacao_ordem DESC, rowid DESC, gtin ASC"
         with self._managed_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
@@ -756,38 +1149,44 @@ class ConsultaGtinRepository:
         filtros = filtros or {}
         sql = """
             SELECT
-                id,
-                ncm,
-                cst,
-                cclasstrib,
-                condicao_legal,
-                descricao_dossie,
-                p_red_ibs,
-                p_red_cbs,
-                publicacao,
-                inicio_vigencia,
-                anexo,
-                ind_nfe,
-                ind_nfce,
-                base_legal,
-                fonte,
-                ultima_atualizacao
-            FROM cenarios_tributarios
+                c.id,
+                c.ncm,
+                c.cst,
+                c.cclasstrib,
+                c.condicao_legal,
+                COALESCE(d.descricao, '') AS descricao_dossie,
+                COALESCE(d.p_red_ibs, '') AS p_red_ibs,
+                COALESCE(d.p_red_cbs, '') AS p_red_cbs,
+                COALESCE(d.publicacao, '') AS publicacao,
+                COALESCE(d.inicio_vigencia, '') AS inicio_vigencia,
+                COALESCE(d.anexo, '') AS anexo,
+                COALESCE(d.ind_nfe, '') AS ind_nfe,
+                COALESCE(d.ind_nfce, '') AS ind_nfce,
+                COALESCE(d.base_legal, '') AS base_legal,
+                c.fonte,
+                c.ultima_atualizacao
+            FROM cenarios_ncm_base c
+            LEFT JOIN dossie_classtrib d ON d.cclasstrib = c.cclasstrib
             WHERE 1=1
         """
         params: list[str] = []
         for campo_sql, campo_filtro in (
-            ("ncm", "ncm"),
-            ("cst", "cst"),
-            ("cclasstrib", "cclasstrib"),
-            ("condicao_legal", "condicao_legal"),
-            ("descricao_dossie", "descricao_dossie"),
+            ("c.ncm", "ncm"),
+            ("c.cst", "cst"),
+            ("c.cclasstrib", "cclasstrib"),
+            ("c.condicao_legal", "condicao_legal"),
         ):
             valor = (filtros.get(campo_filtro) or "").strip()
             if valor:
                 sql += f" AND {campo_sql} LIKE ?"
                 params.append(f"%{valor}%")
-        sql += " ORDER BY ultima_atualizacao DESC, ncm ASC, cst ASC, cclasstrib ASC"
+
+        descricao = (filtros.get("descricao_dossie") or "").strip()
+        if descricao:
+            sql += " AND (COALESCE(d.descricao, '') LIKE ? OR COALESCE(c.condicao_legal, '') LIKE ? OR COALESCE(d.base_legal, '') LIKE ?)"
+            params.extend([f"%{descricao}%", f"%{descricao}%", f"%{descricao}%"])
+
+        sql += " ORDER BY c.ultima_atualizacao DESC, c.ncm ASC, c.cst ASC, c.cclasstrib ASC"
         with self._managed_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
@@ -823,13 +1222,13 @@ class ConsultaGtinRepository:
         with self._managed_conn() as conn:
             total = conn.execute("SELECT COUNT(*) FROM consultas_gtin").fetchone()[0]
             ok = conn.execute(
-                "SELECT COUNT(*) FROM consultas_gtin WHERE divergencia_ncm IN ('OK', 'NAO')"
+                "SELECT COUNT(*) FROM consultas_gtin WHERE divergencia_ncm = 'OK'"
             ).fetchone()[0]
             divergentes = conn.execute(
                 "SELECT COUNT(*) FROM consultas_gtin WHERE divergencia_ncm LIKE 'DIVERGENTE%'"
             ).fetchone()[0]
             outros = total - (ok + divergentes)
-            total_cenarios = conn.execute("SELECT COUNT(*) FROM cenarios_tributarios").fetchone()[0]
+            total_cenarios = conn.execute("SELECT COUNT(*) FROM cenarios_ncm_base").fetchone()[0]
             total_dossies = conn.execute("SELECT COUNT(*) FROM dossie_classtrib").fetchone()[0]
             total_anexos = conn.execute("SELECT COUNT(*) FROM anexos_tributarios").fetchone()[0]
         return {
