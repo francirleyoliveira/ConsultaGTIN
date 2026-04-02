@@ -1,0 +1,1 @@
+"""Mixins utilitarios da GUI."""

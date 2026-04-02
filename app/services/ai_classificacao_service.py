@@ -8,6 +8,19 @@ from app.services.ai_context_service import AIContextService
 from app.services.sqlite_service import ConsultaGtinRepository
 
 
+HEURISTIC_SCORE_BASE_WITHOUT_PRODUCT_TOKENS = 0.12
+HEURISTIC_SCORE_BASE_WITH_PRODUCT_TOKENS = 0.25
+HEURISTIC_SCORE_PER_SCENARIO_TOKEN = 0.08
+HEURISTIC_SCORE_SCENARIO_TOKEN_CAP = 0.35
+HEURISTIC_SCORE_PER_ANEXO_SPEC_MATCH = 0.06
+HEURISTIC_SCORE_ANEXO_SPEC_MATCH_CAP = 0.25
+HEURISTIC_SCORE_BONUS_ANEXO_PRESENTE = 0.10
+HEURISTIC_SCORE_PENALTY_ANEXO_SEM_MATCH = 0.05
+HEURISTIC_SCORE_PENALTY_CONTEXTO_AGREGADO = 0.08
+HEURISTIC_SCORE_MIN = 0.0
+HEURISTIC_SCORE_MAX = 0.99
+
+
 class AIClassificationProvider(Protocol):
     provider_name: str
     model_name: str
@@ -16,6 +29,14 @@ class AIClassificationProvider(Protocol):
 
 
 class HeuristicAIClassificationProvider:
+    """Rankeia apenas cenarios oficiais ja persistidos usando sinais textuais auditaveis.
+
+    A heuristica nao cria CST/cClassTrib novos; ela somente ordena os cenarios oficiais
+    do NCM com base em interseccao textual entre descricao do produto, dossie e
+    particularidades dos anexos. Os pesos sao mantidos em constantes nomeadas para
+    facilitar calibracao e auditoria futura.
+    """
+
     provider_name = "heuristic"
     model_name = "tax-scenario-heuristic-v1"
 
@@ -92,9 +113,12 @@ class HeuristicAIClassificationProvider:
         )
 
         intersecao_cenario = tokens_produto & tokens_cenario
-        score = 0.12 if len(tokens_produto) == 0 else 0.25
+        score = self._score_base(tokens_produto)
         if intersecao_cenario:
-            score += min(0.35, 0.08 * len(intersecao_cenario))
+            score += min(
+                HEURISTIC_SCORE_SCENARIO_TOKEN_CAP,
+                HEURISTIC_SCORE_PER_SCENARIO_TOKEN * len(intersecao_cenario),
+            )
 
         especificidades_relevantes: list[dict[str, Any]] = []
         for especificidade in cenario.get("particularidades_anexo", []):
@@ -108,7 +132,10 @@ class HeuristicAIClassificationProvider:
             )
             intersecao = tokens_produto & tokens_especificidade
             if intersecao:
-                score += min(0.25, 0.06 * len(intersecao))
+                score += min(
+                    HEURISTIC_SCORE_ANEXO_SPEC_MATCH_CAP,
+                    HEURISTIC_SCORE_PER_ANEXO_SPEC_MATCH * len(intersecao),
+                )
                 especificidades_relevantes.append(
                     {
                         "codigo": especificidade.get("codigo", ""),
@@ -125,16 +152,16 @@ class HeuristicAIClassificationProvider:
             restricoes_do_anexo.append(
                 f"Anexo {anexo.get('anexo')} considerado: {anexo.get('descricao', '')}".strip()
             )
-            score += 0.1
+            score += HEURISTIC_SCORE_BONUS_ANEXO_PRESENTE
             if cenario.get("particularidades_anexo") and not especificidades_relevantes:
                 restricoes_do_anexo.append(
                     "Existem particularidades no anexo que nao foram claramente relacionadas ao texto do produto."
                 )
-                score -= 0.05
+                score -= HEURISTIC_SCORE_PENALTY_ANEXO_SEM_MATCH
 
         if produto.get("contexto_agregado"):
             restricoes_do_anexo.append("Contexto agregado por NCM: a aderencia precisa de validacao humana no item final.")
-            score -= 0.08
+            score -= HEURISTIC_SCORE_PENALTY_CONTEXTO_AGREGADO
 
         motivos_favoraveis: list[str] = []
         if intersecao_cenario:
@@ -151,7 +178,7 @@ class HeuristicAIClassificationProvider:
                 "Cenario oficial considerado, mas com evidencias textuais limitadas; revisar com apoio humano."
             )
 
-        score = max(0.0, min(round(score, 3), 0.99))
+        score = max(HEURISTIC_SCORE_MIN, min(round(score, 3), HEURISTIC_SCORE_MAX))
         return {
             "cst": str(cenario.get("cst", "") or ""),
             "cclasstrib": str(cenario.get("cclasstrib", "") or ""),
@@ -163,6 +190,13 @@ class HeuristicAIClassificationProvider:
             "restricoes_do_anexo": restricoes_do_anexo,
             "especificidades_relevantes": especificidades_relevantes,
         }
+
+    def _score_base(self, tokens_produto: set[str]) -> float:
+        return (
+            HEURISTIC_SCORE_BASE_WITHOUT_PRODUCT_TOKENS
+            if len(tokens_produto) == 0
+            else HEURISTIC_SCORE_BASE_WITH_PRODUCT_TOKENS
+        )
 
     def _montar_resumo(
         self,

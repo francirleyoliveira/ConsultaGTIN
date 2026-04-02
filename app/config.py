@@ -27,6 +27,16 @@ def _parse_bool_env(nome: str, padrao: bool) -> bool:
     return valor.strip().lower() not in {"0", "false", "no", "nao", "não", "off"}
 
 
+def _parse_int_env(nome: str, padrao: int) -> int:
+    valor = os.getenv(nome)
+    if valor is None or not valor.strip():
+        return padrao
+    try:
+        return int(valor)
+    except ValueError as exc:
+        raise ValueError(f"Valor invalido para {nome}: {valor!r}. Informe um numero inteiro.") from exc
+
+
 @dataclass(frozen=True)
 class Settings:
     db_user: str | None
@@ -59,7 +69,6 @@ class Settings:
         return self.ssl_ca_bundle or self.ssl_verify
 
 
-
 def load_settings() -> Settings:
     load_dotenv()
     return Settings(
@@ -76,10 +85,10 @@ def load_settings() -> Settings:
         cff_resposta_exemplo_path=os.getenv("CFF_RESPOSTA_EXEMPLO_PATH"),
         cff_anexos_resposta_exemplo_path=os.getenv("CFF_ANEXOS_RESPOSTA_EXEMPLO_PATH"),
         gtin_healthcheck_gtin=os.getenv("GTIN_HEALTHCHECK_GTIN", "7891032015604"),
-        gtin_healthcheck_timeout_seconds=int(os.getenv("GTIN_HEALTHCHECK_TIMEOUT_SECONDS", "12")),
-        gtin_healthcheck_ttl_seconds=int(os.getenv("GTIN_HEALTHCHECK_TTL_SECONDS", "300")),
-        gtin_circuit_breaker_seconds=int(os.getenv("GTIN_CIRCUIT_BREAKER_SECONDS", "180")),
-        gtin_circuit_breaker_failures=int(os.getenv("GTIN_CIRCUIT_BREAKER_FAILURES", "2")),
+        gtin_healthcheck_timeout_seconds=_parse_int_env("GTIN_HEALTHCHECK_TIMEOUT_SECONDS", 12),
+        gtin_healthcheck_ttl_seconds=_parse_int_env("GTIN_HEALTHCHECK_TTL_SECONDS", 300),
+        gtin_circuit_breaker_seconds=_parse_int_env("GTIN_CIRCUIT_BREAKER_SECONDS", 180),
+        gtin_circuit_breaker_failures=_parse_int_env("GTIN_CIRCUIT_BREAKER_FAILURES", 2),
         ssl_verify=_parse_bool_env("SSL_VERIFY", True),
         ssl_ca_bundle=os.getenv("SSL_CA_BUNDLE") or None,
         ai_enabled=_parse_bool_env("AI_ENABLED", True),
@@ -87,7 +96,6 @@ def load_settings() -> Settings:
         ai_model=os.getenv("AI_MODEL", "tax-scenario-heuristic-v1"),
         ai_prompt_version=os.getenv("AI_PROMPT_VERSION", "tax-scenario-v1"),
     )
-
 
 
 def ensure_output_dirs() -> None:

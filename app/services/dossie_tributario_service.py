@@ -18,9 +18,11 @@ class DossieTributarioService:
         self,
         settings: Settings,
         fetcher: Callable[[], Any] | None = None,
+        cache_lookup: Callable[[str], dict[str, Any] | None] | None = None,
     ) -> None:
         self.settings = settings
         self.fetcher = fetcher
+        self.cache_lookup = cache_lookup
 
     def sincronizar_catalogo(self) -> list[dict[str, Any]]:
         if self.fetcher is not None:
@@ -35,6 +37,10 @@ class DossieTributarioService:
         codigo = str(cclasstrib or "").strip()
         if not codigo:
             return {}
+        if self.cache_lookup is not None:
+            registro_cache = self.cache_lookup(codigo) or {}
+            if registro_cache:
+                return registro_cache
         catalogo = self.sincronizar_catalogo()
         for cst in catalogo:
             for classificacao in cst.get("classificacoes_tributarias", []):
@@ -148,3 +154,4 @@ class DossieTributarioService:
         if hasattr(raw, "__dict__"):
             return {key: value for key, value in vars(raw).items() if not key.startswith("_")}
         return {}
+

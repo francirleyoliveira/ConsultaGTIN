@@ -62,6 +62,7 @@ class AnexoTributarioServiceTest(unittest.TestCase):
         self.assertEqual(1, len(anexos[0]["especificidades"]))
         self.assertEqual("105049000", anexos[0]["especificidades"][0]["codigo"])
         self.assertEqual("Servico de transporte multimodal", anexos[0]["especificidades"][0]["descricao"])
+        self.assertEqual("Servico de transporte multimodal", anexos[0]["especificidades"][0]["descr_item_anexo"])
         self.assertEqual("Transporte", anexos[0]["especificidades"][0]["valor"])
 
     @patch('app.services.anexo_tributario_service.get')

@@ -41,6 +41,7 @@ class _FakeConnection:
 class OracleServiceTest(unittest.TestCase):
     def setUp(self) -> None:
         oracle_service._oracle_client_iniciado = False
+        oracle_service._oracle_client_inicializacao_falhou = False
         self.settings = Settings(
             db_user='user',
             db_pass='pass',
@@ -52,14 +53,16 @@ class OracleServiceTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         oracle_service._oracle_client_iniciado = False
+        oracle_service._oracle_client_inicializacao_falhou = False
 
     @patch('app.services.oracle_service.oracledb.init_oracle_client', side_effect=RuntimeError('falha'))
-    def test_inicializacao_falha_nao_bloqueia_novas_tentativas(self, init_mock) -> None:
+    def test_inicializacao_falha_nao_reitera_no_mesmo_processo(self, init_mock) -> None:
         oracle_service.inicializar_oracle_client(self.settings)
         oracle_service.inicializar_oracle_client(self.settings)
 
-        self.assertEqual(2, init_mock.call_count)
+        self.assertEqual(1, init_mock.call_count)
         self.assertFalse(oracle_service._oracle_client_iniciado)
+        self.assertTrue(oracle_service._oracle_client_inicializacao_falhou)
 
     @patch('app.services.oracle_service._carregar_sql_consulta', return_value='SELECT 1 FROM dual')
     @patch('app.services.oracle_service.inicializar_oracle_client')

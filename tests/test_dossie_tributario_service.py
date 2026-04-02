@@ -59,6 +59,22 @@ class DossieTributarioServiceTest(unittest.TestCase):
 
         self.assertFalse(get_mock.call_args.kwargs['verify'])
 
+    def test_consultar_cclasstrib_prioriza_cache_local(self) -> None:
+        settings = Settings(None, None, None, None, None, None)
+        fetcher = Mock(side_effect=AssertionError('nao deveria sincronizar catalogo'))
+        cache = {
+            'cclasstrib': '200035',
+            'descricao': 'Dossie em cache',
+            'anexo': 'VIII',
+        }
+        service = DossieTributarioService(settings, fetcher=fetcher, cache_lookup=lambda codigo: cache if codigo == '200035' else None)
+
+        resultado = service.consultar_cclasstrib('200035')
+
+        self.assertEqual('200035', resultado['cclasstrib'])
+        self.assertEqual('Dossie em cache', resultado['descricao'])
+        fetcher.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

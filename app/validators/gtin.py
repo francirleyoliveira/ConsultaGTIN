@@ -1,4 +1,4 @@
-def validar_digito_gtin(gtin) -> bool:
+def validar_digito_gtin(gtin: str | int | None) -> bool:
     """Valida o digito verificador de um GTIN (8, 12, 13 ou 14 digitos)."""
     try:
         gtin_limpo = str(gtin).strip()
@@ -48,3 +48,4 @@ def comparar_ncm(ncm_erp: str, ncm_sefaz: str) -> str:
         return f"DIVERGENTE: ERP INCOMPLETO ({erp_limpo}) != GS1({sefaz_limpo})"
 
     return f"DIVERGENTE: ERP({erp_limpo}) != GS1({sefaz_limpo})"
+

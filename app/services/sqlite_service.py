@@ -105,6 +105,7 @@ CREATE_TABLES_SQL = [
         anexo TEXT NOT NULL,
         codigo TEXT,
         descricao TEXT,
+        descr_item_anexo TEXT,
         valor TEXT,
         tipo TEXT,
         publicacao TEXT,
@@ -267,6 +268,7 @@ class ConsultaGtinRepository:
             self._garantir_schema_consultas(conn)
             self._garantir_schema_cenarios(conn)
             self._garantir_schema_dossie(conn)
+            self._garantir_schema_anexos(conn)
             self._migrar_datas_ordenacao(conn)
             for sql in CREATE_INDEXES_SQL:
                 conn.execute(sql)
@@ -296,6 +298,18 @@ class ConsultaGtinRepository:
         for coluna, definicao in DOSSIE_COLUMN_DEFS:
             if coluna not in colunas:
                 conn.execute(f"ALTER TABLE dossie_classtrib ADD COLUMN {coluna} {definicao}")
+
+    def _garantir_schema_anexos(self, conn: sqlite3.Connection) -> None:
+        colunas = {row[1] for row in conn.execute("PRAGMA table_info(anexos_especificidades)").fetchall()}
+        if "descr_item_anexo" not in colunas:
+            conn.execute("ALTER TABLE anexos_especificidades ADD COLUMN descr_item_anexo TEXT DEFAULT ''")
+        conn.execute(
+            """
+            UPDATE anexos_especificidades
+            SET descr_item_anexo = COALESCE(NULLIF(TRIM(descr_item_anexo), ''), descricao, '')
+            WHERE TRIM(COALESCE(descr_item_anexo, '')) = ''
+            """
+        )
 
     def _migrar_cenarios_legacy(self, conn: sqlite3.Connection) -> None:
         legacy = "cenarios_tributarios_legacy"
@@ -377,17 +391,23 @@ class ConsultaGtinRepository:
         conn.execute(f"DROP TABLE {legacy}")
 
     def _migrar_datas_ordenacao(self, conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            "SELECT gtin, ultima_atualizacao, ultima_atualizacao_ordem FROM consultas_gtin"
-        ).fetchall()
-        for row in rows:
-            if row["ultima_atualizacao_ordem"]:
-                continue
-            iso = self._converter_data_para_ordem(row["ultima_atualizacao"])
-            conn.execute(
-                "UPDATE consultas_gtin SET ultima_atualizacao_ordem = ? WHERE gtin = ?",
-                (iso, row["gtin"]),
-            )
+        cursor = conn.execute(
+            """
+            SELECT gtin, ultima_atualizacao
+            FROM consultas_gtin
+            WHERE COALESCE(ultima_atualizacao_ordem, '') = ''
+            """
+        )
+        while True:
+            rows = cursor.fetchmany(500)
+            if not rows:
+                break
+            for row in rows:
+                iso = self._converter_data_para_ordem(row["ultima_atualizacao"])
+                conn.execute(
+                    "UPDATE consultas_gtin SET ultima_atualizacao_ordem = ? WHERE gtin = ?",
+                    (iso, row["gtin"]),
+                )
 
     def _converter_data_para_ordem(self, data_texto: str | None) -> str:
         if not data_texto:
@@ -896,10 +916,11 @@ class ConsultaGtinRepository:
                     conn.execute(
                         """
                         INSERT INTO anexos_especificidades (
-                            anexo, codigo, descricao, valor, tipo, publicacao,
+                            anexo, codigo, descricao, descr_item_anexo, valor, tipo, publicacao,
                             inicio_vigencia, fim_vigencia, raw_json, ultima_atualizacao
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT(anexo, codigo, descricao, valor) DO UPDATE SET
+                            descr_item_anexo = excluded.descr_item_anexo,
                             tipo = excluded.tipo,
                             publicacao = excluded.publicacao,
                             inicio_vigencia = excluded.inicio_vigencia,
@@ -911,6 +932,7 @@ class ConsultaGtinRepository:
                             codigo_anexo,
                             especificidade.get("codigo", ""),
                             especificidade.get("descricao", ""),
+                            especificidade.get("descr_item_anexo", "") or especificidade.get("descricao", ""),
                             especificidade.get("valor", ""),
                             especificidade.get("tipo", ""),
                             especificidade.get("publicacao", ""),
@@ -934,7 +956,7 @@ class ConsultaGtinRepository:
             if not anexo_row:
                 return None
             especificidades_rows = conn.execute(
-                "SELECT codigo, descricao, valor, tipo, publicacao, inicio_vigencia, fim_vigencia, raw_json FROM anexos_especificidades WHERE anexo = ? ORDER BY codigo ASC, descricao ASC",
+                "SELECT codigo, descricao, descr_item_anexo, valor, tipo, publicacao, inicio_vigencia, fim_vigencia, raw_json FROM anexos_especificidades WHERE anexo = ? ORDER BY codigo ASC, descricao ASC",
                 (codigo,),
             ).fetchall()
         registro = dict(anexo_row)
@@ -1009,6 +1031,7 @@ class ConsultaGtinRepository:
                 COALESCE(cs.csts_relacionados, '') AS csts_relacionados,
                 COALESCE(cc.cclasstrib_relacionados, '') AS cclasstrib_relacionados,
                 e.codigo AS codigo_especificidade,
+                COALESCE(NULLIF(TRIM(e.descr_item_anexo), ''), e.descricao, '') AS descr_item_anexo,
                 e.descricao AS descricao_especificidade,
                 e.valor,
                 e.tipo,
@@ -1028,14 +1051,14 @@ class ConsultaGtinRepository:
             ("a.anexo", "anexo"),
             ("a.descricao", "descricao"),
             ("e.codigo", "codigo_especificidade"),
-            ("e.descricao", "descricao_especificidade"),
+            ("COALESCE(NULLIF(TRIM(e.descr_item_anexo), ''), e.descricao, '')", "descr_item_anexo"),
             ("e.tipo", "tipo"),
         ):
             valor = (filtros.get(campo_filtro) or "").strip()
             if valor:
                 sql += f" AND {campo_sql} LIKE ?"
                 params.append(f"%{valor}%")
-        sql += " ORDER BY a.anexo ASC, e.codigo ASC, e.descricao ASC"
+        sql += " ORDER BY a.anexo ASC, e.codigo ASC, COALESCE(NULLIF(TRIM(e.descr_item_anexo), ''), e.descricao, '') ASC"
         with self._managed_conn() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [dict(row) for row in rows]
@@ -1240,3 +1263,4 @@ class ConsultaGtinRepository:
             "total_dossies": total_dossies,
             "total_anexos": total_anexos,
         }
+

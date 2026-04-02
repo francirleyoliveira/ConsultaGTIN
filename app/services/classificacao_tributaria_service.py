@@ -33,7 +33,10 @@ class ClassificacaoTributariaService:
         self.repository = repository
         self.sefaz_consultor = sefaz_consultor
         self.scraper_service = scraper_service or ConformidadeScraperService(settings)
-        self.dossie_service = dossie_service or DossieTributarioService(settings)
+        self.dossie_service = dossie_service or DossieTributarioService(
+            settings,
+            cache_lookup=repository.obter_dossie_cache,
+        )
         self.anexo_service = anexo_service or AnexoTributarioService(settings)
         self.gtin_health_monitor = gtin_health_monitor or GtinServiceHealthMonitor(settings)
 
@@ -156,14 +159,7 @@ class ClassificacaoTributariaService:
         if status in STATUS_FALHA_COMUNICACAO:
             return self._montar_consulta_com_cache_oficial(codprod, gtin, ncm_erp_limpo, status, motivo, consulta_cache, descricao_erp)
 
-        if status in STATUS_SUCESSO_SEFAZ:
-            divergencia = comparar_ncm(ncm_erp_limpo, ncm_sefaz)
-        elif status == "GTIN_INVALIDO":
-            divergencia = "GTIN COM DIGITO INVALIDO"
-        elif status == "GTIN_FORA_GS1_BR":
-            divergencia = "GTIN FORA DO ESCOPO GS1 BR"
-        else:
-            divergencia = "CONSULTA FALHOU"
+        divergencia = self._mapear_divergencia(status, ncm_erp_limpo, ncm_sefaz)
         return {
             "cod_winthor": str(codprod),
             "gtin": gtin,
@@ -224,12 +220,7 @@ class ClassificacaoTributariaService:
         }
 
     def _montar_consulta(self, codprod: Any, gtin: str, ncm_erp: str, status: str, motivo: str, descricao_erp: str = "") -> dict[str, str]:
-        if status == "GTIN_INVALIDO":
-            divergencia = "GTIN COM DIGITO INVALIDO"
-        elif status == "GTIN_FORA_GS1_BR":
-            divergencia = "GTIN FORA DO ESCOPO GS1 BR"
-        else:
-            divergencia = "CONSULTA FALHOU"
+        divergencia = self._mapear_divergencia(status, ncm_erp, "")
         return {
             "cod_winthor": str(codprod),
             "gtin": gtin,
@@ -243,3 +234,13 @@ class ClassificacaoTributariaService:
             "descricao_erp": descricao_erp,
             "cest": "",
         }
+
+    def _mapear_divergencia(self, status: str, ncm_erp: str, ncm_sefaz: str) -> str:
+        if status in STATUS_SUCESSO_SEFAZ:
+            return comparar_ncm(ncm_erp, ncm_sefaz)
+        if status == "GTIN_INVALIDO":
+            return "GTIN COM DIGITO INVALIDO"
+        if status == "GTIN_FORA_GS1_BR":
+            return "GTIN FORA DO ESCOPO GS1 BR"
+        return "CONSULTA FALHOU"
+

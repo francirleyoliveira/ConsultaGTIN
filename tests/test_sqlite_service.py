@@ -255,6 +255,7 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
         retorno_anexos = self.repo.listar_retorno_anexos({"anexo": "IV"})
         self.assertEqual(1, len(retorno_anexos))
         self.assertEqual("ESP2", retorno_anexos[0]["codigo_especificidade"])
+        self.assertEqual("Faixa especial", retorno_anexos[0]["descr_item_anexo"])
         self.assertEqual("Faixa especial", retorno_anexos[0]["descricao_especificidade"])
         self.assertEqual(1, resumo["total"])
         self.assertEqual(1, resumo["ok"])
@@ -624,6 +625,48 @@ class ConsultaGtinRepositoryTest(unittest.TestCase):
 
         self.assertEqual(1, len(consultas))
         self.assertEqual("7891234567896", consultas[0]["gtin"])
+
+
+    def test_migracao_datas_ordenacao_atualiza_apenas_registros_sem_ordem(self) -> None:
+        db_path = self.temp_dir / "migration.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE consultas_gtin (
+                    gtin TEXT PRIMARY KEY,
+                    cod_winthor TEXT,
+                    data_hora_resposta TEXT,
+                    status_sefaz TEXT,
+                    motivo_sefaz TEXT,
+                    ncm_winthor TEXT,
+                    ncm_oficial TEXT,
+                    divergencia_ncm TEXT,
+                    descricao_produto TEXT,
+                    descricao_erp TEXT,
+                    cest TEXT,
+                    ultima_atualizacao TEXT NOT NULL,
+                    ultima_atualizacao_ordem TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO consultas_gtin (gtin, ultima_atualizacao, ultima_atualizacao_ordem) VALUES (?, ?, ?)",
+                ("111", "02/04/2026 10:00:00", ""),
+            )
+            conn.execute(
+                "INSERT INTO consultas_gtin (gtin, ultima_atualizacao, ultima_atualizacao_ordem) VALUES (?, ?, ?)",
+                ("222", "01/04/2026 09:00:00", "2026-04-01 09:00:00"),
+            )
+            conn.commit()
+
+        repo = ConsultaGtinRepository(db_path)
+        with repo._managed_conn() as conn:
+            rows = conn.execute(
+                "SELECT gtin, ultima_atualizacao_ordem FROM consultas_gtin ORDER BY gtin ASC"
+            ).fetchall()
+
+        self.assertEqual("2026-04-02 10:00:00", rows[0]["ultima_atualizacao_ordem"])
+        self.assertEqual("2026-04-01 09:00:00", rows[1]["ultima_atualizacao_ordem"])
 
 
 if __name__ == "__main__":

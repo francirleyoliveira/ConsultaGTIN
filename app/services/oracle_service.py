@@ -11,20 +11,22 @@ from app.config import QUERIES_DIR, Settings
 
 logger = logging.getLogger(__name__)
 _oracle_client_iniciado = False
+_oracle_client_inicializacao_falhou = False
 
 
 
 def inicializar_oracle_client(settings: Settings) -> None:
-    global _oracle_client_iniciado
+    global _oracle_client_iniciado, _oracle_client_inicializacao_falhou
 
-    if _oracle_client_iniciado or not settings.oracle_client_caminho:
+    if _oracle_client_iniciado or _oracle_client_inicializacao_falhou or not settings.oracle_client_caminho:
         return
 
     try:
         oracledb.init_oracle_client(lib_dir=settings.oracle_client_caminho)
     except Exception:
+        _oracle_client_inicializacao_falhou = True
         logger.warning(
-            "Falha ao inicializar Oracle Client; uma nova tentativa sera feita na proxima consulta.",
+            "Falha ao inicializar Oracle Client; novas tentativas automaticas ficaram desabilitadas ate reiniciar a aplicacao.",
             exc_info=True,
         )
         return

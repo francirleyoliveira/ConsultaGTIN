@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -21,78 +22,82 @@ class GtinServiceHealthMonitor:
         self.last_result: dict[str, Any] | None = None
         self.consecutive_failures = 0
         self.circuit_open_until: datetime | None = None
+        self._lock = threading.Lock()
 
     def verificar(self, force: bool = False) -> dict[str, Any]:
-        agora = self.now_provider()
-        if self._circuito_aberto(agora):
-            resultado = self._resultado_circuito(agora)
+        with self._lock:
+            agora = self.now_provider()
+            if self._circuito_aberto(agora):
+                resultado = self._resultado_circuito(agora)
+                self.last_result = resultado
+                return resultado
+
+            ttl = max(int(self.settings.gtin_healthcheck_ttl_seconds), 0)
+            if (
+                not force
+                and ttl > 0
+                and self.last_result
+                and self.last_result.get("ok")
+                and self.last_check_at
+                and (agora - self.last_check_at).total_seconds() < ttl
+            ):
+                cached = dict(self.last_result)
+                cached["from_cache"] = True
+                cached["message"] = self._formatar_mensagem(cached, cache=True)
+                return cached
+
+            bruto = dict(
+                self.checker(
+                    self.settings,
+                    self.settings.gtin_healthcheck_gtin,
+                    self.settings.gtin_healthcheck_timeout_seconds,
+                )
+            )
+            resultado = self._normalizar_resultado(bruto, agora, from_cache=False)
+            self.last_check_at = agora
             self.last_result = resultado
             return resultado
 
-        ttl = max(int(self.settings.gtin_healthcheck_ttl_seconds), 0)
-        if (
-            not force
-            and ttl > 0
-            and self.last_result
-            and self.last_result.get("ok")
-            and self.last_check_at
-            and (agora - self.last_check_at).total_seconds() < ttl
-        ):
-            cached = dict(self.last_result)
-            cached["from_cache"] = True
-            cached["message"] = self._formatar_mensagem(cached, cache=True)
-            return cached
-
-        bruto = dict(
-            self.checker(
-                self.settings,
-                self.settings.gtin_healthcheck_gtin,
-                self.settings.gtin_healthcheck_timeout_seconds,
-            )
-        )
-        resultado = self._normalizar_resultado(bruto, agora, from_cache=False)
-        self.last_check_at = agora
-        self.last_result = resultado
-        return resultado
-
     def registrar_resultado_consulta(self, consulta: dict[str, Any]) -> None:
-        agora = self.now_provider()
-        status = str(consulta.get("status") or consulta.get("status_sefaz") or "").strip()
-        if not status or status in {"GTIN_INVALIDO", "GTIN_FORA_GS1_BR", "SEFAZ_INDISPONIVEL"}:
-            return
+        with self._lock:
+            agora = self.now_provider()
+            status = str(consulta.get("status") or consulta.get("status_sefaz") or "").strip()
+            if not status or status in {"GTIN_INVALIDO", "GTIN_FORA_GS1_BR", "SEFAZ_INDISPONIVEL"}:
+                return
 
-        if status.startswith("949"):
-            self.consecutive_failures = 0
-            self.circuit_open_until = None
-            self.last_check_at = agora
-            self.last_result = {
-                "ok": True,
-                "status": status,
-                "motivo": str(consulta.get("motivo") or consulta.get("motivo_sefaz") or "").strip(),
-                "gtin_teste": str(consulta.get("gtin") or self.settings.gtin_healthcheck_gtin),
-                "checked_at": agora.strftime("%d/%m/%Y %H:%M:%S"),
-                "from_cache": False,
-                "blocked": False,
-                "message": f"Servico GTIN respondeu normalmente com status {status}.",
-            }
-            return
-
-        if status == "Erro":
-            motivo = str(consulta.get("motivo") or consulta.get("motivo_sefaz") or "Falha no transporte com a Sefaz").strip()
-            self.last_check_at = agora
-            self.last_result = self._normalizar_resultado(
-                {
-                    "ok": False,
+            if status.startswith("949"):
+                self.consecutive_failures = 0
+                self.circuit_open_until = None
+                self.last_check_at = agora
+                self.last_result = {
+                    "ok": True,
                     "status": status,
-                    "motivo": motivo,
+                    "motivo": str(consulta.get("motivo") or consulta.get("motivo_sefaz") or "").strip(),
                     "gtin_teste": str(consulta.get("gtin") or self.settings.gtin_healthcheck_gtin),
-                },
-                agora,
-                from_cache=False,
-            )
+                    "checked_at": agora.strftime("%d/%m/%Y %H:%M:%S"),
+                    "from_cache": False,
+                    "blocked": False,
+                    "message": f"Servico GTIN respondeu normalmente com status {status}.",
+                }
+                return
+
+            if status == "Erro":
+                motivo = str(consulta.get("motivo") or consulta.get("motivo_sefaz") or "Falha no transporte com a Sefaz").strip()
+                self.last_check_at = agora
+                self.last_result = self._normalizar_resultado(
+                    {
+                        "ok": False,
+                        "status": status,
+                        "motivo": motivo,
+                        "gtin_teste": str(consulta.get("gtin") or self.settings.gtin_healthcheck_gtin),
+                    },
+                    agora,
+                    from_cache=False,
+                )
 
     def esta_bloqueado(self) -> bool:
-        return self._circuito_aberto(self.now_provider())
+        with self._lock:
+            return self._circuito_aberto(self.now_provider())
 
     def _circuito_aberto(self, agora: datetime) -> bool:
         return self.circuit_open_until is not None and agora < self.circuit_open_until

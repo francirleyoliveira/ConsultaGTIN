@@ -122,6 +122,14 @@ class AnexoTributarioService:
             str(dados.get("descrExcecao") or "").strip(),
         ]
         valor = " | ".join(item for item in observacoes if item)
+        descr_item_anexo = str(dados.get("descrItemAnexo") or "").strip()
+        descricao = str(
+            dados.get("DescricaoEspecificidade")
+            or dados.get("descricao")
+            or dados.get("Descricao")
+            or descr_item_anexo
+            or ""
+        ).strip()
         return {
             "codigo": str(
                 dados.get("CodigoEspecificidade")
@@ -130,13 +138,8 @@ class AnexoTributarioService:
                 or dados.get("codNcmNbs")
                 or ""
             ).strip(),
-            "descricao": str(
-                dados.get("DescricaoEspecificidade")
-                or dados.get("descricao")
-                or dados.get("Descricao")
-                or dados.get("descrItemAnexo")
-                or ""
-            ).strip(),
+            "descricao": descricao,
+            "descr_item_anexo": descr_item_anexo or descricao,
             "valor": valor or str(dados.get("Valor") or dados.get("valor") or "").strip(),
             "tipo": str(dados.get("Tipo") or dados.get("tipo") or dados.get("TipoNomenclatura") or "").strip(),
             "publicacao": str(dados.get("Publicacao") or dados.get("publicacao") or "").strip(),
